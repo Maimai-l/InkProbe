@@ -76,8 +76,10 @@ InkProbe 是一个 iPadOS 原生测试应用，用于采集 PencilKit 像素橡�
 旧版本导出的会话中，每个 `steps/NNNN/strokes.json` 都包含当时全部笔划的完整数据，体积很大。`tools/slim_sessions.py`（只依赖 Python 3 标准库）把它们转换为上面描述的精简格式，不修改原文件夹：
 
 ```sh
-python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zip> ... [-o 输出目录]
+python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zip> ... [-o 输出目录] [-j 4]
 ```
+
+- 可以同时给出多个输入，例如 `python3 tools/slim_sessions.py A B C D`。所有会话默认 4 个并行处理，`-j` 修改并行数（不超过 CPU 核数）。每个进程处理大会话时约占用数百 MB 内存。
 
 - 不指定 `-o` 时，输出到第一个输入旁边的 `<输入名>-slim/`，其中每个会话一个同名文件夹。
 - steps 改为增量编码，所有 JSON 改为紧凑格式，steps 中只保留最后一步的位图，`final/` 中的文件全部保留。

@@ -26,13 +26,16 @@ final/strokes.json 仍然是完整数据（只压缩格式）。meta.json 中增
 情况 b 中去掉的 points 必须与引用处的 points 完全一致。
 
 用法：
-    python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zip> ... [-o 输出目录]
+    python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zip> ... [-o 输出目录] [-j 4]
 
+可以同时给出多个输入，所有会话默认 4 个一组并行处理（-j 修改并行数）。
 不指定 -o 时，输出到第一个输入旁边的 <输入名>-slim 目录。只使用 Python 3 标准库。
 """
 
 import argparse
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import shutil
 import sys
 import tempfile
@@ -234,12 +237,35 @@ def with_encoding(doc, encoding):
     return result
 
 
+def process_one(src, dst, force, verify):
+    """在子进程中处理一个会话，返回 (会话名, 是否成功, 结果文本, 转换前字节数, 转换后字节数)。"""
+    if dst.exists() and force:
+        shutil.rmtree(dst)
+    existed = dst.exists()
+    try:
+        steps, counts = slim_session(src, dst, verify=verify)
+    except Exception as error:  # 单个会话失败不影响其他会话
+        # 只删除本次创建的不完整输出，不删除已存在的目录。
+        if not existed and dst.exists():
+            shutil.rmtree(dst)
+        return src.name, False, f"失败：{error}", 0, 0
+    before = dir_size(src)
+    after = dir_size(dst)
+    text = (
+        f"{steps} 步；完整数据 {counts['full']} 个，共享路径数据 {counts['pathRef']} 个，"
+        f"引用已有片段 {counts['fragmentRef']} 个；{human(before)} → {human(after)}"
+    )
+    return src.name, True, text, before, after
+
+
 def main():
     parser = argparse.ArgumentParser(description="把 InkProbe 会话转换为精简格式（增量 steps、压缩 JSON、只保留最后一步位图）。")
     parser.add_argument("inputs", nargs="+", type=Path, help="会话文件夹、sessions 目录或导出的 zip")
     parser.add_argument("-o", "--output", type=Path, help="输出目录，默认为 <第一个输入>-slim")
     parser.add_argument("--force", action="store_true", help="输出目录中已有同名会话时覆盖")
     parser.add_argument("--no-verify", action="store_true", help="跳过无损校验")
+    parser.add_argument("-j", "--jobs", type=int, default=4,
+                        help="同时处理的会话数，默认 4；每个进程约占用数百 MB 内存")
     args = parser.parse_args()
 
     first = args.inputs[0].resolve()
@@ -266,37 +292,40 @@ def main():
         if not sessions:
             return 1
 
+        # 不同输入中若有同名会话，输出会互相覆盖，因此直接报错。
+        names = {}
+        for src in sessions:
+            if src.name in names:
+                print(f"同名会话出现两次：{names[src.name]} 与 {src}", file=sys.stderr)
+                return 1
+            names[src.name] = src
+
         output.mkdir(parents=True, exist_ok=True)
         failures = 0
         total_before = 0
         total_after = 0
-        for src in sessions:
-            dst = output / src.name
-            print(f"处理 {src.name}")
-            if dst.exists() and args.force:
-                shutil.rmtree(dst)
-            existed = dst.exists()
-            try:
-                steps, counts = slim_session(src, dst, verify=not args.no_verify)
-            except Exception as error:  # 单个会话失败不影响其他会话
-                failures += 1
-                print(f"  失败：{error}", file=sys.stderr)
-                # 只删除本次创建的不完整输出，不删除已存在的目录。
-                if not existed and dst.exists():
-                    shutil.rmtree(dst)
-                continue
-            before = dir_size(src)
-            after = dir_size(dst)
-            total_before += before
-            total_after += after
-            print(
-                f"  {steps} 步；完整数据 {counts['full']} 个，共享路径数据 {counts['pathRef']} 个，"
-                f"引用已有片段 {counts['fragmentRef']} 个；{human(before)} → {human(after)}"
-            )
+        jobs = max(1, min(args.jobs, len(sessions), os.cpu_count() or 1))
+        print(f"共 {len(sessions)} 个会话，同时处理 {jobs} 个")
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = [
+                pool.submit(process_one, src, output / src.name, args.force, not args.no_verify)
+                for src in sessions
+            ]
+            for future in as_completed(futures):
+                name, ok, text, before, after = future.result()
+                if ok:
+                    total_before += before
+                    total_after += after
+                    print(f"完成 {name}：{text}")
+                else:
+                    failures += 1
+                    print(f"{name}：{text}", file=sys.stderr)
 
         print(f"输出目录：{output}")
         if total_before:
             print(f"合计：{human(total_before)} → {human(total_after)}")
+        if failures:
+            print(f"失败 {failures} 个", file=sys.stderr)
         return 1 if failures else 0
     finally:
         for temp in temp_dirs:

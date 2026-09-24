@@ -89,7 +89,8 @@ struct ExportTask {
 ///     input.json
 ///     final/drawing.drawing, render@1x.png, render@2x.png, render@<screenScale>x.png,
 ///           render-transparent@2x.png, strokes.json
-///     steps/NNNN/drawing.drawing, render@2x.png, strokes.json, step.json
+///     steps/NNNN/drawing.drawing, strokes.json（增量编码）, step.json；
+///                只有最后一步额外包含 render@2x.png
 @MainActor
 final class SessionExportJob {
     let folderURL: URL
@@ -108,7 +109,7 @@ final class SessionExportJob {
         let warnings = ExportWarnings()
         let steps = session.steps
         let finalRect = DrawingRenderer.renderRect(for: finalDrawing)
-        // 各步位图统一使用最终 drawing 的 renderRect；最终 drawing 为空时退化为各步 renderRect 的并集。
+        // steps 的 renderRect 使用最终 drawing 的 renderRect；最终 drawing 为空时退化为各步 renderRect 的并集。
         let stepRect = finalRect ?? DrawingRenderer.unionRenderRect(of: steps.map { $0.drawing })
         if finalRect == nil, stepRect != nil {
             warnings.items.append("最终 drawing 为空，steps 位图改用各步 renderRect 的并集")
@@ -154,6 +155,8 @@ final class SessionExportJob {
             })
         }
 
+        let registry = FragmentRegistry()
+        let lastStepNumber = steps.last?.step
         for step in steps {
             let folderName = SessionExportJob.stepFolderName(step.afterSequenceId)
             let dir = stepsDir.appendingPathComponent(folderName, isDirectory: true)
@@ -161,11 +164,15 @@ final class SessionExportJob {
                 try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
                 try step.drawing.dataRepresentation()
                     .write(to: dir.appendingPathComponent("drawing.drawing", isDirectory: false), options: .atomic)
-                try JSONWriter.data(StrokeAnalyzer.document(for: step.drawing, renderRect: stepRect))
+                try JSONWriter.data(StrokeAnalyzer.document(
+                    for: step.drawing, renderRect: stepRect,
+                    registry: registry, step: step.step, stepDir: folderName
+                ))
                     .write(to: dir.appendingPathComponent("strokes.json", isDirectory: false), options: .atomic)
                 try JSONWriter.data(session.stepDocument(step))
                     .write(to: dir.appendingPathComponent("step.json", isDirectory: false), options: .atomic)
-                if let rect = stepRect {
+                // 只保留最后一步的位图。
+                if step.step == lastStepNumber, let rect = stepRect {
                     try DrawingRenderer.writePNG(
                         drawing: step.drawing, rect: rect, scale: 2, whiteBackground: true,
                         to: dir.appendingPathComponent("render@2x.png", isDirectory: false),

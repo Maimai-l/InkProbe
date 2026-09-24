@@ -51,14 +51,11 @@ enum JSONValue {
     }
 }
 
-/// 把 `JSONValue` 序列化为 UTF-8 文本。
-///
-/// 输出为缩进格式，但只含标量（或标量数组）的对象和数组写在同一行，
-/// 使每个样本、每个路径点各占一行，便于阅读和按行比较。
+/// 把 `JSONValue` 序列化为 UTF-8 文本（紧凑格式，不含缩进和换行）。
 enum JSONWriter {
     static func data(_ value: JSONValue) -> Data {
         var out = ""
-        write(value, indent: 0, into: &out)
+        write(value, into: &out)
         out.append("\n")
         return Data(out.utf8)
     }
@@ -71,34 +68,7 @@ enum JSONWriter {
         return "\(d)"
     }
 
-    private static func isScalar(_ v: JSONValue) -> Bool {
-        switch v {
-        case .array, .object:
-            return false
-        default:
-            return true
-        }
-    }
-
-    private static func isScalarArray(_ v: JSONValue) -> Bool {
-        if case .array(let items) = v {
-            return items.allSatisfy { isScalar($0) }
-        }
-        return false
-    }
-
-    private static func isFlat(_ v: JSONValue) -> Bool {
-        switch v {
-        case .array(let items):
-            return items.allSatisfy { isScalar($0) || isScalarArray($0) }
-        case .object(let pairs):
-            return pairs.allSatisfy { isScalar($0.1) || isScalarArray($0.1) }
-        default:
-            return true
-        }
-    }
-
-    private static func write(_ v: JSONValue, indent: Int, into out: inout String) {
+    private static func write(_ v: JSONValue, into out: inout String) {
         switch v {
         case .null:
             out += "null"
@@ -111,53 +81,21 @@ enum JSONWriter {
         case .string(let s):
             writeString(s, into: &out)
         case .array(let items):
-            if items.isEmpty {
-                out += "[]"
-                return
-            }
-            if isFlat(v) {
-                out += "["
-                for (i, item) in items.enumerated() {
-                    if i > 0 { out += ", " }
-                    write(item, indent: indent, into: &out)
-                }
-                out += "]"
-                return
-            }
-            let pad = String(repeating: "  ", count: indent + 1)
-            out += "[\n"
+            out += "["
             for (i, item) in items.enumerated() {
-                out += pad
-                write(item, indent: indent + 1, into: &out)
-                out += i < items.count - 1 ? ",\n" : "\n"
+                if i > 0 { out += "," }
+                write(item, into: &out)
             }
-            out += String(repeating: "  ", count: indent) + "]"
+            out += "]"
         case .object(let pairs):
-            if pairs.isEmpty {
-                out += "{}"
-                return
-            }
-            if isFlat(v) {
-                out += "{"
-                for (i, pair) in pairs.enumerated() {
-                    if i > 0 { out += ", " }
-                    writeString(pair.0, into: &out)
-                    out += ": "
-                    write(pair.1, indent: indent, into: &out)
-                }
-                out += "}"
-                return
-            }
-            let pad = String(repeating: "  ", count: indent + 1)
-            out += "{\n"
+            out += "{"
             for (i, pair) in pairs.enumerated() {
-                out += pad
+                if i > 0 { out += "," }
                 writeString(pair.0, into: &out)
-                out += ": "
-                write(pair.1, indent: indent + 1, into: &out)
-                out += i < pairs.count - 1 ? ",\n" : "\n"
+                out += ":"
+                write(pair.1, into: &out)
             }
-            out += String(repeating: "  ", count: indent) + "}"
+            out += "}"
         }
     }
 

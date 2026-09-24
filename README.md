@@ -41,12 +41,19 @@ InkProbe 是一个 iPadOS 原生测试应用，用于采集 PencilKit 像素橡�
     steps/
       0001/                   序列编号，四位补零
         drawing.drawing
-        render@2x.png
-        strokes.json
+        strokes.json          增量编码，见下文
         step.json
+      ...
+      NNNN/                   最后一步
+        render@2x.png         只有最后一步保留位图
   ```
 
-- 所有 JSON 由应用内的 JSON 写入器生成，而不是 `JSONEncoder`：可选字段显式写为 `null`，`NaN` 和 `Infinity` 写为 `null`，Double 使用 Swift 的最短往返表示输出，不做四舍五入；整数值的 Double 写成不带小数点的整数。只含标量的对象（例如一个样本、一个路径点）写在同一行。
+- 所有 JSON 由应用内的 JSON 写入器生成，而不是 `JSONEncoder`：可选字段显式写为 `null`，`NaN` 和 `Infinity` 写为 `null`，Double 使用 Swift 的最短往返表示输出，不做四舍五入；整数值的 Double 写成不带小数点的整数。JSON 为紧凑格式，不含缩进和换行。
+- `strokes.json` 顶层的 `strokesEncoding` 说明编码方式：
+  - `final/strokes.json` 为 `full`，每个片段都是完整数据。
+  - `steps/NNNN/strokes.json` 为 `incremental`。某个片段（按 `fragmentHash` 区分）第一次出现时写完整数据；之后的步骤中只写引用 `{"index", "fragmentHash", "pathHash", "fullDataStep", "fullDataDir"}`。完整数据位于 `steps/<fullDataDir>/strokes.json`，其中 `fullDataStep` 是对应的步骤号。完整数据中除 `index` 外的所有字段与引用处相同，`index` 以引用中的值为准。判断一个元素是完整数据还是引用，看它是否包含 `points` 字段。
+  - 这样每步只存储新出现的片段，总大小随实际改动量增长，而不是随“步数 × 笔划数”增长。
+- `meta.json` 的 `exportFormat` 字段记录以上格式：`{"stepStrokes": "incremental", "stepImages": "lastStepOnly", "json": "compact"}`。没有该字段的会话是旧格式（每步完整数据、每步都有位图、JSON 带缩进），可以用 `tools/slim_sessions.py` 转换。
 - 时间：`t` 与 `tReceived` 都是相对 `meta.json` 中 `clockOrigin` 的秒数。`clockOrigin` 是会话第一条样本的 `UITouch.timestamp`；会话中没有任何样本时，退化为会话开始时的系统时间（同一时基）。在第一条样本之前发生的事件，其 `t` 为负数。
 - `tReceived` 是应用收到估计属性更新时的系统时间。更新通常在 `touchesEnded` 之后到达，记录器按 `estimationUpdateIndex` 匹配所属序列。
 - `touchId` 只分配给被记录的触摸（Pencil，以及 `.anyInput` 模式下的手指）。
@@ -55,9 +62,23 @@ InkProbe 是一个 iPadOS 原生测试应用，用于采集 PencilKit 像素橡�
 - 指纹：`fragmentHash` 中 `pathHash` 的 8 字节按大端（即十六进制字符串的书写顺序）加入。JS 端不需要重新计算指纹，直接比较字符串即可。
 - `mask` 与 `points` 均为 PencilKit 返回的原始值，未应用 `transform`。未经变换的笔划 `transform` 为单位矩阵，此时两者即为 drawing 坐标。
 - 逐步快照：序列结束后，在紧接着的 `canvasViewDrawingDidChange(_:)` 中保存；如果 PencilKit 在同一次事件分发中先于记录器提交了变化，也按 `drawingChanged = true` 处理；500 ms 内没有变化回调时保存并标记 `drawingChanged = false`。下一个序列开始时，若上一个快照仍在等待，立即保存（`drawingChanged = false`），避免新序列的改动混入。
-- 各步位图使用最终 drawing 的 `renderRect`；各步 `strokes.json` 中的 `renderRect` 与位图一致。最终 drawing 为空时，改用各步 `renderRect` 的并集，并在 `meta.json` 的 `warnings` 中说明。
+- steps 中只有最后一步保留 `render@2x.png`。各步 `strokes.json` 中的 `renderRect` 使用最终 drawing 的 `renderRect`；最终 drawing 为空时，改用各步 `renderRect` 的并集，并在 `meta.json` 的 `warnings` 中说明。
 - 单张位图超过 1.5 亿像素时跳过，并写入 `meta.json` 的 `warnings`。
-- `meta.json` 在需求文档的字段之外，还包含 `canvas.initialZoom`、`canvas.initialVisibleSize`、`counts.steps` 和 `warnings`。
+- `meta.json` 在需求文档的字段之外，还包含 `canvas.initialZoom`、`canvas.initialVisibleSize`、`counts.steps`、`exportFormat` 和 `warnings`。
+
+## 转换旧格式的会话
+
+旧版本导出的会话中，每个 `steps/NNNN/strokes.json` 都包含当时全部笔划的完整数据，体积很大。`tools/slim_sessions.py`（只依赖 Python 3 标准库）把它们转换为上面描述的精简格式，不修改原文件夹：
+
+```sh
+python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zip> ... [-o 输出目录]
+```
+
+- 不指定 `-o` 时，输出到第一个输入旁边的 `<输入名>-slim/`，其中每个会话一个同名文件夹。
+- steps 改为增量编码，所有 JSON 改为紧凑格式，steps 中只保留最后一步的位图，`final/` 中的文件全部保留。
+- 默认校验转换是否无损：每个引用所指的完整数据，去掉 `index` 后必须与原数据完全一致，否则该会话报错并删除其不完整的输出。`--no-verify` 跳过校验。
+- 输出目录中已有同名会话时报错，`--force` 覆盖。已经是精简格式的会话会被跳过并报错。
+- 数值不会改变：Python 读写 JSON 时 Double 同样使用最短往返表示。
 
 ## 本地构建
 
@@ -111,4 +132,6 @@ InkProbe/
               StrokeModels.swift          strokes.json、指纹与 step diff
   UI/         ToolbarView.swift, SessionListViewController.swift
   Resources/  Assets.xcassets（Info.plist 由 XcodeGen 生成）
+tools/
+  slim_sessions.py            旧格式会话转换脚本
 ```

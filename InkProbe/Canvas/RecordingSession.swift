@@ -168,6 +168,11 @@ final class RecordingSession {
                 ("finalStrokes", .int(finalStrokeCount)),
                 ("steps", .int(steps.count))
             ])),
+            ("exportFormat", .object([
+                ("stepStrokes", .string("incremental")),
+                ("stepImages", .string("lastStepOnly")),
+                ("json", .string("compact"))
+            ])),
             ("warnings", .strings(warnings))
         ])
     }

@@ -25,6 +25,11 @@ struct StrokeFingerprint {
     }
 }
 
+/// 增量编码时记录每个片段第一次写入完整数据的步骤。
+final class FragmentRegistry {
+    var firstWritten: [String: (step: Int, dir: String)] = [:]
+}
+
 enum StrokeAnalyzer {
     /// 曲线插值步长（pt）。
     static let interpolationDistance: CGFloat = 0.5
@@ -99,16 +104,36 @@ enum StrokeAnalyzer {
         return drawing.strokes.enumerated().map { fingerprint(of: $0.element, index: $0.offset) }
     }
 
-    /// 生成 strokes.json 的完整内容。
-    static func document(for drawing: PKDrawing, renderRect: CGRect?) -> JSONValue {
+    /// 生成 strokes.json 的内容。
+    ///
+    /// `registry` 为 nil 时每个片段都写完整数据（`strokesEncoding = "full"`，用于 final/）。
+    /// 传入 `registry` 时使用增量编码（用于 steps/）：片段第一次出现时写完整数据并登记，
+    /// 之后只写引用 `{index, fragmentHash, pathHash, fullDataStep, fullDataDir}`。
+    static func document(for drawing: PKDrawing, renderRect: CGRect?,
+                         registry: FragmentRegistry? = nil, step: Int = 0, stepDir: String = "") -> JSONValue {
         let strokes = drawing.strokes
         var items: [JSONValue] = []
         items.reserveCapacity(strokes.count)
         for (index, stroke) in strokes.enumerated() {
-            items.append(strokeJSON(stroke, fingerprint: fingerprint(of: stroke, index: index)))
+            let fp = fingerprint(of: stroke, index: index)
+            if let registry = registry {
+                if let first = registry.firstWritten[fp.fragmentHash] {
+                    items.append(.object([
+                        ("index", .int(index)),
+                        ("fragmentHash", .string(fp.fragmentHash)),
+                        ("pathHash", .string(fp.pathHash)),
+                        ("fullDataStep", .int(first.step)),
+                        ("fullDataDir", .string(first.dir))
+                    ]))
+                    continue
+                }
+                registry.firstWritten[fp.fragmentHash] = (step: step, dir: stepDir)
+            }
+            items.append(strokeJSON(stroke, fingerprint: fp))
         }
         return .object([
             ("schemaVersion", .int(1)),
+            ("strokesEncoding", .string(registry == nil ? "full" : "incremental")),
             ("renderRect", renderRect.map { JSONValue.rect($0) } ?? .null),
             ("strokes", .array(items))
         ])

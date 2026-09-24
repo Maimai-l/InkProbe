@@ -170,6 +170,7 @@ final class RecordingSession {
             ])),
             ("exportFormat", .object([
                 ("stepStrokes", .string("incremental")),
+                ("stepPathData", .string("firstAppearanceOnly")),
                 ("stepImages", .string("lastStepOnly")),
                 ("json", .string("compact"))
             ])),

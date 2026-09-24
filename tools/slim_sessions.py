@@ -4,16 +4,26 @@
 旧版导出中，每个 steps/NNNN/strokes.json 都包含当时画布上全部笔划的完整数据，
 总大小随“步数 × 笔划数”增长。本脚本生成一份新的精简文件夹，原文件夹不做任何修改：
 
-1. steps/NNNN/strokes.json 改为增量编码：某个片段（fragmentHash）第一次出现时写完整数据，
-   之后只写引用 {"index", "fragmentHash", "pathHash", "fullDataStep", "fullDataDir"}，
-   完整数据在 steps/<fullDataDir>/strokes.json 中（fullDataStep 是对应的步骤号）。
+1. steps/NNNN/strokes.json 改为增量编码，按以下顺序判断每个片段：
+   a. 片段（fragmentHash）在之前出现过：只写引用
+      {"index", "fragmentHash", "pathHash", "fullDataStep", "fullDataDir"}，
+      完整数据在 steps/<fullDataDir>/strokes.json 中。
+   b. 片段是新的，但它的来源路径（pathHash）在之前出现过：写片段自身的全部字段
+      （mask、maskedPathRanges、transform、renderBounds 等），但去掉 points 和
+      interpolatedPoints，改为 "pathDataStep"、"pathDataDir" 指向路径数据所在的步骤。
+      像素橡皮反复擦同一条笔划时，每一步只有 mask 和区间在变，路径数据只需存一次。
+   c. 其他情况：写完整数据。
+   说明：interpolatedPoints 是 PencilKit 按当时的 maskedPathRanges 逐段计算的，情况 b 中
+   不再保留这一步各区间的插值点；需要时可由该步的 drawing.drawing 在原生端重新计算。
+   points（控制点）只取决于路径，校验会确认它与引用处完全一致。
 2. 所有 JSON 去掉缩进和换行。数值原样保留：Python 的 float 输出同样是最短往返表示，
    不会丢失精度。
 3. steps 中只保留最后一步的 render@2x.png。final/ 中的位图全部保留。
 
 final/strokes.json 仍然是完整数据（只压缩格式）。meta.json 中增加 exportFormat 字段说明以上变化。
 
-默认会校验转换是否无损：每个引用所指的完整数据，去掉 index 后必须与原始数据完全一致。
+默认会校验：情况 a 中引用所指的完整数据去掉 index 后必须与原数据完全一致；
+情况 b 中去掉的 points 必须与引用处的 points 完全一致。
 
 用法：
     python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zip> ... [-o 输出目录]
@@ -31,6 +41,7 @@ from pathlib import Path
 
 EXPORT_FORMAT = {
     "stepStrokes": "incremental",
+    "stepPathData": "firstAppearanceOnly",
     "stepImages": "lastStepOnly",
     "json": "compact",
 }
@@ -46,6 +57,10 @@ def dump_json(obj, path):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
         f.write("\n")
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False)
 
 
 def canonical_without_index(stroke):
@@ -130,16 +145,18 @@ def slim_session(src, dst, verify):
     step_dirs = [d for d in src_steps.iterdir() if d.is_dir()] if src_steps.is_dir() else []
     step_dirs.sort(key=step_number)
 
-    written = {}    # fragmentHash -> (首次写入完整数据的步骤号, 文件夹名)
-    canonical = {}  # fragmentHash -> 规范文本（仅在校验时使用）
-    full_count = 0
-    ref_count = 0
+    fragment_written = {}   # fragmentHash -> (步骤号, 文件夹名)
+    path_written = {}       # pathHash -> (步骤号, 文件夹名)
+    fragment_canonical = {}  # fragmentHash -> 规范文本（仅在校验时使用）
+    path_points = {}        # pathHash -> points 的规范文本（仅在校验时使用）
+    counts = {"full": 0, "pathRef": 0, "fragmentRef": 0}
 
     for position, step_dir in enumerate(step_dirs):
         number = step_number(step_dir)
         is_last = position == len(step_dirs) - 1
         out_dir = dst_steps / step_dir.name
         out_dir.mkdir()
+        location = (number, step_dir.name)
 
         for item in sorted(step_dir.iterdir()):
             if not item.is_file():
@@ -151,26 +168,47 @@ def slim_session(src, dst, verify):
                 strokes = []
                 for stroke in doc.get("strokes", []):
                     fragment = stroke["fragmentHash"]
-                    if fragment in written:
-                        if verify and canonical[fragment] != canonical_without_index(stroke):
+                    path_hash = stroke.get("pathHash")
+                    if fragment in fragment_written:
+                        # a. 片段已出现过
+                        if verify and fragment_canonical[fragment] != canonical_without_index(stroke):
                             raise RuntimeError(
                                 f"校验失败：步骤 {number} 中片段 {fragment} 与步骤 "
-                                f"{written[fragment][0]} 中的完整数据不一致"
+                                f"{fragment_written[fragment][0]} 中的完整数据不一致"
                             )
                         strokes.append({
                             "index": stroke["index"],
                             "fragmentHash": fragment,
-                            "pathHash": stroke.get("pathHash"),
-                            "fullDataStep": written[fragment][0],
-                            "fullDataDir": written[fragment][1],
+                            "pathHash": path_hash,
+                            "fullDataStep": fragment_written[fragment][0],
+                            "fullDataDir": fragment_written[fragment][1],
                         })
-                        ref_count += 1
+                        counts["fragmentRef"] += 1
+                        continue
+
+                    fragment_written[fragment] = location
+                    if verify:
+                        fragment_canonical[fragment] = canonical_without_index(stroke)
+
+                    if path_hash in path_written:
+                        # b. 新片段，路径已出现过
+                        if verify and path_points[path_hash] != canonical(stroke.get("points")):
+                            raise RuntimeError(
+                                f"校验失败：步骤 {number} 中路径 {path_hash} 的 points 与步骤 "
+                                f"{path_written[path_hash][0]} 中的不一致"
+                            )
+                        slim = {k: v for k, v in stroke.items() if k not in ("points", "interpolatedPoints")}
+                        slim["pathDataStep"] = path_written[path_hash][0]
+                        slim["pathDataDir"] = path_written[path_hash][1]
+                        strokes.append(slim)
+                        counts["pathRef"] += 1
                     else:
-                        written[fragment] = (number, step_dir.name)
+                        # c. 完整数据
+                        path_written[path_hash] = location
                         if verify:
-                            canonical[fragment] = canonical_without_index(stroke)
+                            path_points[path_hash] = canonical(stroke.get("points"))
                         strokes.append(stroke)
-                        full_count += 1
+                        counts["full"] += 1
                 doc["strokes"] = strokes
                 dump_json(with_encoding(doc, "incremental"), out_dir / item.name)
             elif item.name.endswith(".json"):
@@ -181,7 +219,7 @@ def slim_session(src, dst, verify):
             else:
                 shutil.copy2(item, out_dir / item.name)
 
-    return len(step_dirs), full_count, ref_count
+    return len(step_dirs), counts
 
 
 def with_encoding(doc, encoding):
@@ -239,7 +277,7 @@ def main():
                 shutil.rmtree(dst)
             existed = dst.exists()
             try:
-                steps, full, refs = slim_session(src, dst, verify=not args.no_verify)
+                steps, counts = slim_session(src, dst, verify=not args.no_verify)
             except Exception as error:  # 单个会话失败不影响其他会话
                 failures += 1
                 print(f"  失败：{error}", file=sys.stderr)
@@ -251,7 +289,10 @@ def main():
             after = dir_size(dst)
             total_before += before
             total_after += after
-            print(f"  {steps} 步，完整片段 {full} 个，引用 {refs} 个；{human(before)} → {human(after)}")
+            print(
+                f"  {steps} 步；完整数据 {counts['full']} 个，共享路径数据 {counts['pathRef']} 个，"
+                f"引用已有片段 {counts['fragmentRef']} 个；{human(before)} → {human(after)}"
+            )
 
         print(f"输出目录：{output}")
         if total_before:

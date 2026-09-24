@@ -25,9 +25,10 @@ struct StrokeFingerprint {
     }
 }
 
-/// 增量编码时记录每个片段第一次写入完整数据的步骤。
+/// 增量编码时记录每个片段、每条路径第一次写入完整数据的步骤。
 final class FragmentRegistry {
-    var firstWritten: [String: (step: Int, dir: String)] = [:]
+    var fragmentWritten: [String: (step: Int, dir: String)] = [:]
+    var pathWritten: [String: (step: Int, dir: String)] = [:]
 }
 
 enum StrokeAnalyzer {
@@ -107,8 +108,11 @@ enum StrokeAnalyzer {
     /// 生成 strokes.json 的内容。
     ///
     /// `registry` 为 nil 时每个片段都写完整数据（`strokesEncoding = "full"`，用于 final/）。
-    /// 传入 `registry` 时使用增量编码（用于 steps/）：片段第一次出现时写完整数据并登记，
-    /// 之后只写引用 `{index, fragmentHash, pathHash, fullDataStep, fullDataDir}`。
+    /// 传入 `registry` 时使用增量编码（用于 steps/），按顺序判断每个片段：
+    /// 1. 片段已出现过：只写引用 `{index, fragmentHash, pathHash, fullDataStep, fullDataDir}`；
+    /// 2. 片段是新的但路径已出现过：写片段自身的字段，去掉 `points` 和 `interpolatedPoints`，
+    ///    改写 `pathDataStep`、`pathDataDir` 指向路径数据所在的步骤；
+    /// 3. 其他情况写完整数据。
     static func document(for drawing: PKDrawing, renderRect: CGRect?,
                          registry: FragmentRegistry? = nil, step: Int = 0, stepDir: String = "") -> JSONValue {
         let strokes = drawing.strokes
@@ -117,7 +121,7 @@ enum StrokeAnalyzer {
         for (index, stroke) in strokes.enumerated() {
             let fp = fingerprint(of: stroke, index: index)
             if let registry = registry {
-                if let first = registry.firstWritten[fp.fragmentHash] {
+                if let first = registry.fragmentWritten[fp.fragmentHash] {
                     items.append(.object([
                         ("index", .int(index)),
                         ("fragmentHash", .string(fp.fragmentHash)),
@@ -127,7 +131,12 @@ enum StrokeAnalyzer {
                     ]))
                     continue
                 }
-                registry.firstWritten[fp.fragmentHash] = (step: step, dir: stepDir)
+                registry.fragmentWritten[fp.fragmentHash] = (step: step, dir: stepDir)
+                if let pathData = registry.pathWritten[fp.pathHash] {
+                    items.append(strokeJSON(stroke, fingerprint: fp, pathDataAt: pathData))
+                    continue
+                }
+                registry.pathWritten[fp.pathHash] = (step: step, dir: stepDir)
             }
             items.append(strokeJSON(stroke, fingerprint: fp))
         }
@@ -139,13 +148,39 @@ enum StrokeAnalyzer {
         ])
     }
 
-    static func strokeJSON(_ stroke: PKStroke, fingerprint fp: StrokeFingerprint) -> JSONValue {
+    /// `pathDataAt` 不为 nil 时不写 `points` 和 `interpolatedPoints`，改写路径数据所在的步骤。
+    static func strokeJSON(_ stroke: PKStroke, fingerprint fp: StrokeFingerprint,
+                           pathDataAt: (step: Int, dir: String)? = nil) -> JSONValue {
         let path = stroke.path
         let t = stroke.transform
 
         var randomSeed: JSONValue = .null
         if #available(iOS 16.0, *) {
             randomSeed = .int(Int(stroke.randomSeed))
+        }
+
+        var pairs: [(String, JSONValue)] = [
+            ("index", .int(fp.index)),
+            ("pathCreationDate", .num(fp.pathCreationDate)),
+            ("pathCreationDateISO", .string(isoFormatter.string(from: path.creationDate))),
+            ("pathCount", .int(path.count)),
+            ("pathHash", .string(fp.pathHash)),
+            ("fragmentHash", .string(fp.fragmentHash)),
+            ("ink", .object([
+                ("inkType", .string(ToolState.inkTypeName(stroke.ink.inkType))),
+                ("color", .nums(ColorUtil.srgbComponents(stroke.ink.color)))
+            ])),
+            ("transform", .nums([Double(t.a), Double(t.b), Double(t.c), Double(t.d), Double(t.tx), Double(t.ty)])),
+            ("randomSeed", randomSeed),
+            ("renderBounds", .rect(stroke.renderBounds))
+        ]
+
+        if let pathData = pathDataAt {
+            pairs.append(("mask", .str(fp.maskSVG)))
+            pairs.append(("maskedPathRanges", fp.rangesJSON))
+            pairs.append(("pathDataStep", .int(pathData.step)))
+            pairs.append(("pathDataDir", .string(pathData.dir)))
+            return .object(pairs)
         }
 
         var points: [JSONValue] = []
@@ -169,25 +204,11 @@ enum StrokeAnalyzer {
             }
         }
 
-        return .object([
-            ("index", .int(fp.index)),
-            ("pathCreationDate", .num(fp.pathCreationDate)),
-            ("pathCreationDateISO", .string(isoFormatter.string(from: path.creationDate))),
-            ("pathCount", .int(path.count)),
-            ("pathHash", .string(fp.pathHash)),
-            ("fragmentHash", .string(fp.fragmentHash)),
-            ("ink", .object([
-                ("inkType", .string(ToolState.inkTypeName(stroke.ink.inkType))),
-                ("color", .nums(ColorUtil.srgbComponents(stroke.ink.color)))
-            ])),
-            ("transform", .nums([Double(t.a), Double(t.b), Double(t.c), Double(t.d), Double(t.tx), Double(t.ty)])),
-            ("randomSeed", randomSeed),
-            ("renderBounds", .rect(stroke.renderBounds)),
-            ("points", .array(points)),
-            ("interpolatedPoints", .array(interpolated)),
-            ("mask", .str(fp.maskSVG)),
-            ("maskedPathRanges", fp.rangesJSON)
-        ])
+        pairs.append(("points", .array(points)))
+        pairs.append(("interpolatedPoints", .array(interpolated)))
+        pairs.append(("mask", .str(fp.maskSVG)))
+        pairs.append(("maskedPathRanges", fp.rangesJSON))
+        return .object(pairs)
     }
 
     static func pointJSON(_ p: PKStrokePoint, rangeIndex: Int?) -> JSONValue {

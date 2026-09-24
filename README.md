@@ -51,9 +51,14 @@ InkProbe 是一个 iPadOS 原生测试应用，用于采集 PencilKit 像素橡�
 - 所有 JSON 由应用内的 JSON 写入器生成，而不是 `JSONEncoder`：可选字段显式写为 `null`，`NaN` 和 `Infinity` 写为 `null`，Double 使用 Swift 的最短往返表示输出，不做四舍五入；整数值的 Double 写成不带小数点的整数。JSON 为紧凑格式，不含缩进和换行。
 - `strokes.json` 顶层的 `strokesEncoding` 说明编码方式：
   - `final/strokes.json` 为 `full`，每个片段都是完整数据。
-  - `steps/NNNN/strokes.json` 为 `incremental`。某个片段（按 `fragmentHash` 区分）第一次出现时写完整数据；之后的步骤中只写引用 `{"index", "fragmentHash", "pathHash", "fullDataStep", "fullDataDir"}`。完整数据位于 `steps/<fullDataDir>/strokes.json`，其中 `fullDataStep` 是对应的步骤号。完整数据中除 `index` 外的所有字段与引用处相同，`index` 以引用中的值为准。判断一个元素是完整数据还是引用，看它是否包含 `points` 字段。
-  - 这样每步只存储新出现的片段，总大小随实际改动量增长，而不是随“步数 × 笔划数”增长。
-- `meta.json` 的 `exportFormat` 字段记录以上格式：`{"stepStrokes": "incremental", "stepImages": "lastStepOnly", "json": "compact"}`。没有该字段的会话是旧格式（每步完整数据、每步都有位图、JSON 带缩进），可以用 `tools/slim_sessions.py` 转换。
+  - `steps/NNNN/strokes.json` 为 `incremental`，按以下顺序判断每个片段：
+    1. 片段（`fragmentHash`）在之前的步骤中出现过：只写引用 `{"index", "fragmentHash", "pathHash", "fullDataStep", "fullDataDir"}`，完整数据位于 `steps/<fullDataDir>/strokes.json`，除 `index` 外所有字段相同。
+    2. 片段是新的，但来源路径（`pathHash`）之前出现过：写片段自身的全部字段（`mask`、`maskedPathRanges`、`transform`、`renderBounds` 等），不写 `points` 和 `interpolatedPoints`，改写 `pathDataStep`、`pathDataDir`，指向路径数据所在的步骤。
+    3. 其他情况写完整数据。
+  - 判断方式：含 `points` 为完整数据，含 `pathDataDir` 为情况 2，含 `fullDataDir` 为情况 1。
+  - 原因：像素橡皮反复擦同一条笔划时，每一步只有 `mask` 和区间在变，路径的控制点和插值点完全相同。按片段去重在这种情况下不起作用，必须按路径去重。
+  - 注意：`interpolatedPoints` 是按当时的 `maskedPathRanges` 逐段计算的。情况 2 中不再保存这一步各区间的插值点，需要时可由该步的 `drawing.drawing` 在原生端重新计算。
+- `meta.json` 的 `exportFormat` 字段记录以上格式：`{"stepStrokes": "incremental", "stepPathData": "firstAppearanceOnly", "stepImages": "lastStepOnly", "json": "compact"}`。没有该字段的会话是旧格式（每步完整数据、每步都有位图、JSON 带缩进），可以用 `tools/slim_sessions.py` 转换。
 - 时间：`t` 与 `tReceived` 都是相对 `meta.json` 中 `clockOrigin` 的秒数。`clockOrigin` 是会话第一条样本的 `UITouch.timestamp`；会话中没有任何样本时，退化为会话开始时的系统时间（同一时基）。在第一条样本之前发生的事件，其 `t` 为负数。
 - `tReceived` 是应用收到估计属性更新时的系统时间。更新通常在 `touchesEnded` 之后到达，记录器按 `estimationUpdateIndex` 匹配所属序列。
 - `touchId` 只分配给被记录的触摸（Pencil，以及 `.anyInput` 模式下的手指）。
@@ -76,7 +81,8 @@ python3 tools/slim_sessions.py <会话文件夹 | sessions 目录 | 导出的 zi
 
 - 不指定 `-o` 时，输出到第一个输入旁边的 `<输入名>-slim/`，其中每个会话一个同名文件夹。
 - steps 改为增量编码，所有 JSON 改为紧凑格式，steps 中只保留最后一步的位图，`final/` 中的文件全部保留。
-- 默认校验转换是否无损：每个引用所指的完整数据，去掉 `index` 后必须与原数据完全一致，否则该会话报错并删除其不完整的输出。`--no-verify` 跳过校验。
+- 默认校验：情况 1 中引用所指的完整数据去掉 `index` 后必须与原数据完全一致；情况 2 中去掉的 `points` 必须与路径数据所在步骤的 `points` 完全一致。校验失败时该会话报错，并删除其不完整的输出。`--no-verify` 跳过校验。
+- 分析体积来源：`python3 tools/analyze_session.py <会话文件夹>`。
 - 输出目录中已有同名会话时报错，`--force` 覆盖。已经是精简格式的会话会被跳过并报错。
 - 数值不会改变：Python 读写 JSON 时 Double 同样使用最短往返表示。
 

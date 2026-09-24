@@ -1,0 +1,79 @@
+name: InkProbe
+
+options:
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+# 可按需修改的值集中在 target 的 settings.base 中：
+#   APP_DISPLAY_NAME           主屏幕显示的应用名称
+#   PRODUCT_BUNDLE_IDENTIFIER  Bundle Identifier
+#   MARKETING_VERSION / CURRENT_PROJECT_VERSION  版本号
+# 说明：XcodeGen 会在 target 级别写入 iOS 预设值（例如 TARGETED_DEVICE_FAMILY = "1,2"），
+# 这些预设会覆盖工程级别的设置，因此关键设置都放在 target 级别。
+
+targets:
+  InkProbe:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: InkProbe
+    settings:
+      base:
+        APP_DISPLAY_NAME: InkProbe
+        PRODUCT_NAME: InkProbe
+        PRODUCT_BUNDLE_IDENTIFIER: dev.local.inkprobe
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "2"
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        DEVELOPMENT_TEAM: ""
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+    info:
+      path: InkProbe/Resources/Info.plist
+      properties:
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleDisplayName: $(APP_DISPLAY_NAME)
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: $(PRODUCT_NAME)
+        CFBundlePackageType: APPL
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        MinimumOSVersion: "15.0"
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIRequiresFullScreen: true
+        UIUserInterfaceStyle: Light
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleApplication:
+              - UISceneConfigurationName: Default Configuration
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).SceneDelegate
+
+schemes:
+  InkProbe:
+    build:
+      targets:
+        InkProbe: all
+    run:
+      config: Debug
+    archive:
+      config: Release

@@ -1,0 +1,13 @@
+# XcodeGen 生成的工程与 Info.plist 不入库
+*.xcodeproj
+InkProbe/Resources/Info.plist
+
+# 构建产物
+build/
+DerivedData/
+Payload/
+*.ipa
+
+# 其他
+.DS_Store
+xcuserdata/

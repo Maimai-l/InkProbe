@@ -46,9 +46,6 @@ enum DrawingRenderer {
         format.preferredRange = .standard
         let canvas = CGRect(origin: .zero, size: rect.size)
         let renderer = UIGraphicsImageRenderer(bounds: canvas, format: format)
-        guard renderer.format.scale == scale, renderer.format.preferredRange == .standard else {
-            return nil
-        }
         return renderer.pngData { context in
             if whiteBackground {
                 UIColor.white.setFill()

@@ -14,7 +14,8 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
     /// viewportChanged 事件的最小记录间隔。
     static let viewportEventInterval: TimeInterval = 0.05
 
-    private let canvasView = PKCanvasView()
+    /// 每个新会话都换成一个全新的 PKCanvasView（见 `replaceCanvas()`）。
+    private var canvasView = PKCanvasView()
     private let toolbar = ToolbarView()
     private let toolPicker = PKToolPicker()
     private let touchLogger = TouchLogger(target: nil, action: nil)
@@ -23,6 +24,7 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
     private var session: RecordingSession?
     private var didPerformInitialLayout = false
     private var snapshotsEnabled = true
+    private var pencilOnly = true
     private var pendingSnapshotSequenceId: Int?
     private var pendingSnapshotToken = 0
     private var lastDrawingChangeUptime: TimeInterval = -Double.infinity
@@ -42,7 +44,8 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .white
-        configureCanvas()
+        configureTouchLogger()
+        configure(canvasView)
         configureToolbar()
         layoutViews()
         configureToolPicker()
@@ -56,8 +59,8 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
         super.viewDidLayoutSubviews()
         guard !didPerformInitialLayout, canvasView.bounds.width > 0, canvasView.bounds.height > 0 else { return }
         didPerformInitialLayout = true
-        // 启动时自动创建一个未命名会话，并把视口定位到画布中心。
-        startNewSession(named: nil)
+        // 启动时自动创建一个未命名会话，并把视口定位到画布中心。画布本来就是新的，不需要替换。
+        startNewSession(named: nil, replacingCanvas: false)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -67,29 +70,70 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
 
     // MARK: - 配置
 
-    private func configureCanvas() {
-        canvasView.translatesAutoresizingMaskIntoConstraints = false
-        canvasView.delegate = self
-        canvasView.backgroundColor = .white
-        canvasView.isOpaque = true
-        canvasView.overrideUserInterfaceStyle = .light
-        canvasView.drawingPolicy = .pencilOnly
-        canvasView.minimumZoomScale = CanvasViewController.minZoom
-        canvasView.maximumZoomScale = CanvasViewController.maxZoom
-        canvasView.zoomScale = 1.0
-        // 不让安全区域改变 contentInset，保证 drawing 坐标 = (视图坐标 + contentOffset) ÷ zoomScale。
-        canvasView.contentInsetAdjustmentBehavior = .never
-        canvasView.contentInset = .zero
-
-        touchLogger.canvasView = canvasView
-        touchLogger.recordsDirectTouches = false
+    private func configureTouchLogger() {
+        touchLogger.recordsDirectTouches = !pencilOnly
         touchLogger.onSequenceBegan = { [weak self] sequence in
             self?.sequenceDidBegin(sequence)
         }
         touchLogger.onSequenceEnded = { [weak self] sequence in
             self?.sequenceDidEnd(sequence)
         }
-        canvasView.addGestureRecognizer(touchLogger)
+    }
+
+    private func configure(_ canvas: PKCanvasView) {
+        canvas.translatesAutoresizingMaskIntoConstraints = false
+        canvas.delegate = self
+        canvas.backgroundColor = .white
+        canvas.isOpaque = true
+        canvas.overrideUserInterfaceStyle = .light
+        canvas.drawingPolicy = pencilOnly ? .pencilOnly : .anyInput
+        canvas.minimumZoomScale = CanvasViewController.minZoom
+        canvas.maximumZoomScale = CanvasViewController.maxZoom
+        canvas.zoomScale = 1.0
+        // 不让安全区域改变 contentInset，保证 drawing 坐标 = (视图坐标 + contentOffset) ÷ zoomScale。
+        canvas.contentInsetAdjustmentBehavior = .never
+        canvas.contentInset = .zero
+
+        touchLogger.canvasView = canvas
+        canvas.addGestureRecognizer(touchLogger)
+    }
+
+    private func installConstraints(for canvas: PKCanvasView) {
+        NSLayoutConstraint.activate([
+            canvas.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
+            canvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            canvas.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+    }
+
+    /// 用一个全新的 PKCanvasView 替换当前画布。
+    ///
+    /// 只把 `drawing` 设为空时，PencilKit 有时只重新渲染可见区域中的一部分，
+    /// 其余区域仍显示旧笔划（数据已清空，笔划数为 0）。新的视图没有任何旧的渲染内容。
+    private func replaceCanvas() {
+        let old = canvasView
+        old.undoManager?.removeAllActions()
+        toolPicker.setVisible(false, forFirstResponder: old)
+        toolPicker.removeObserver(old)
+        old.delegate = nil
+        old.removeGestureRecognizer(touchLogger)
+
+        let canvas = PKCanvasView()
+        configure(canvas)
+        // 让新画布使用工具选择器当前选中的工具（只同步，不改变选择器的选择）。
+        canvas.tool = toolPicker.selectedTool
+        view.insertSubview(canvas, belowSubview: toolbar)
+        installConstraints(for: canvas)
+        old.removeFromSuperview()
+        canvasView = canvas
+        view.layoutIfNeeded()
+
+        toolPicker.setVisible(true, forFirstResponder: canvas)
+        toolPicker.addObserver(canvas)
+        if view.window != nil {
+            canvas.becomeFirstResponder()
+        }
     }
 
     private func configureToolbar() {
@@ -121,12 +165,9 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
             toolbar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.heightAnchor.constraint(equalToConstant: 52),
-            canvasView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            canvasView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            canvasView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            canvasView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            toolbar.heightAnchor.constraint(equalToConstant: 52)
         ])
+        installConstraints(for: canvasView)
     }
 
     private func configureToolPicker() {
@@ -306,6 +347,7 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
     // MARK: - 工具栏开关
 
     private func setPencilOnly(_ isOn: Bool) {
+        pencilOnly = isOn
         canvasView.drawingPolicy = isOn ? .pencilOnly : .anyInput
         touchLogger.recordsDirectTouches = !isOn
         session?.record(.drawingPolicyChanged(time: Clock.now, policy: drawingPolicyName))
@@ -351,15 +393,19 @@ final class CanvasViewController: UIViewController, PKCanvasViewDelegate, PKTool
         present(alert, animated: true)
     }
 
-    private func startNewSession(named rawName: String?) {
+    private func startNewSession(named rawName: String?, replacingCanvas: Bool = true) {
         pendingSnapshotSequenceId = nil
         pendingSnapshotToken += 1
         session = nil
         touchLogger.session = nil
         touchLogger.finishActiveSequences(endPhase: "sessionReset")
 
-        canvasView.drawing = PKDrawing()
-        canvasView.undoManager?.removeAllActions()
+        if replacingCanvas {
+            replaceCanvas()
+        } else {
+            canvasView.drawing = PKDrawing()
+            canvasView.undoManager?.removeAllActions()
+        }
         currentStrokeCount = 0
         lastDrawingChangeUptime = -Double.infinity
         resetViewport()
